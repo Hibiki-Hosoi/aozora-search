@@ -1,40 +1,107 @@
 package main
 
 import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
+	"regexp"
 	"testing"
-
-	"github.com/jarcoal/httpmock"
-	"github.com/stretchr/testify/assert"
 )
 
-func TestFindAuthorAndZIP(t *testing.T) {
-	// Start an HTTP mock
-	httpmock.Activate()
-	defer httpmock.DeactivateAndReset()
+func TestFindEntries(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Println(r.URL.String())
+		if r.URL.String() == "/" {
+			w.Write([]byte(`
+			<table summary="作家データ">
+			<tr><td class="header">分類：</td><td>著者</td></tr>
+			<tr><td class="header">作家名：</td><td>テスト　太郎</td></tr>
+			<tr><td class="header">作家名読み：</td><td>テスト　タロウ</td></tr>
+			<tr><td class="header">ローマ字表記：</td><td>Test, Taro</td></tr>
+			</table>
+			<ol>
+			<li><a href="../cards/999999/card001.html">テスト書籍001</a></li>
+			<li><a href="../cards/999999/card002.html">テスト書籍002</a></li>
+			<li><a href="../cards/999999/card003.html">テスト書籍003</a></li>
+			</ol>
+			`))
+		} else {
+			pat := regexp.MustCompile(`.*/cards/([0-9]+)/card([0-9]+).html$`)
+			token := pat.FindStringSubmatch(r.URL.String())
+			w.Write([]byte(fmt.Sprintf(`
+				<table summary="作家データ">
+				<tr><td class="header">分類：</td><td>著者</td></tr>
+				<tr><td class="header">作家名：</td><td>テスト　太郎</td></tr>
+				<tr><td class="header">作家名読み：</td><td>テスト　タロウ</td></tr>
+				<tr><td class="header">ローマ字表記：</td><td>Test, Taro</td></tr>
+				</table>
+				<table border="1" summary="ダウンロードデータ" class="download">
+				<tr>
+					<td><a href="./files/%[1]s_%[2]s.zip">%[1]s_%[2]s.zip</a></td>
+				</tr>
+				</table>
+				`, token[1], token[2])))
+		}
+	}))
+	defer ts.Close()
 
-	// Mock the HTTP response
-	httpmock.RegisterResponder("GET", "https://example.com/sample",
-		httpmock.NewStringResponder(200, `<table summary="作家データ"><tr><td></td><td>Haruki Murakami</td></tr></table><table class="download"><a href="sample.zip">Download</a></table>`))
+	tmp := pageURLFormat
+	pageURLFormat = ts.URL + "/cards/%s/card%s.html"
+	defer func() {
+		pageURLFormat = tmp
+	}()
 
-	author, zipURL := findAuthorAndZIP("https://example.com/sample")
-	assert.Equal(t, "Haruki Murakami", author, "Expected author name does not match")
-	assert.Equal(t, "sample.zip", zipURL, "Expected ZIP URL does not match")
+	got, err := findEntries(ts.URL)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+
+	want := []Entry{
+		{
+			AuthorID: "999999",
+			Author:   "テスト　太郎",
+			TitleID:  "001",
+			Title:    "テスト書籍001",
+			SiteURL:  ts.URL,
+			ZipURL:   ts.URL + "/cards/999999/files/999999_001.zip",
+		},
+		{
+			AuthorID: "999999",
+			Author:   "テスト　太郎",
+			TitleID:  "002",
+			Title:    "テスト書籍002",
+			SiteURL:  ts.URL,
+			ZipURL:   ts.URL + "/cards/999999/files/999999_002.zip",
+		},
+		{
+			AuthorID: "999999",
+			Author:   "テスト　太郎",
+			TitleID:  "003",
+			Title:    "テスト書籍003",
+			SiteURL:  ts.URL,
+			ZipURL:   ts.URL + "/cards/999999/files/999999_003.zip",
+		},
+	}
+
+	if !reflect.DeepEqual(want, got) {
+		t.Errorf("want %+v, but got %+v", want, got)
+	}
 }
 
-func TestFindEntries(t *testing.T) {
-	// Start an HTTP mock
-	httpmock.Activate()
-	defer httpmock.DeactivateAndReset()
+func TextExtractText(t *testing.T) {
+	ts := httptest.NewServer(http.FileServer(http.Dir(".")))
+	defer ts.Close()
 
-	// Mock the HTTP response
-	httpmock.RegisterResponder("GET", "https://www.aozora.gr.jp/index_pages/person879.html",
-		httpmock.NewStringResponder(200, `<ol><li><a href="/cards/000879/card123.html">Sample Title</a></li></ol>`))
+	got, err := extractText(ts.URL + "/testdata/example.zip")
+	if err != nil {
+		t.Fatal(err)
+		return
+	}
 
-	httpmock.RegisterResponder("GET", "http://www.aozora.gr.jp/cards/000879/card123.html",
-		httpmock.NewStringResponder(200, `<table summary="作家データ"><tr><td></td><td>Haruki Murakami</td></tr></table><table class="download"><a href="book.zip">Download</a></table>`))
-
-	entries, err := findEntries("https://www.aozora.gr.jp/index_pages/person879.html")
-	assert.Nil(t, err, "Expected no error")
-	assert.Len(t, entries, 1, "Expected one entry in the result")
-	assert.Equal(t, "book.zip", entries[0].ZipURL, "Expected ZIP URL does not match")
+	want := "テストデータ\n"
+	if want != got {
+		t.Errorf("want %+v, but got %+v", want, got)
+	}
 }
